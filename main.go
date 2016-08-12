@@ -5,9 +5,17 @@ import (
 	"bytes"
 	"fmt"
 	"io/ioutil"
-	"os"
 	"os/exec"
+	"log"
+	"syscall"
 )
+
+type Config struct {
+	WatchDir string
+	BuildDir string
+	BuildFile string
+	StatusFile string
+}
 
 type BuildResult struct {
 	Success bool
@@ -17,16 +25,18 @@ type BuildResult struct {
 func main() {
 	// This method leaks goroutines.
 
-	watchDir := "/Users/miles/go/src/github.com/keybase/client/go/"
-	buildDir := "/Users/miles/go/src/github.com/keybase/client/go/keybase/"
-	buildFile := "/Users/miles/go/bin/keybase"
-	statusFile := "/tmp/buildstatus"
+	c := Config{
+		WatchDir: "/Users/miles/go/src/github.com/keybase/client/go/",
+		BuildDir: "/Users/miles/go/src/github.com/keybase/client/go/keybase/",
+		BuildFile: "/Users/miles/go/bin/keybase",
+		StatusFile: "/tmp/buildstatus",
+	}
 
 	watchCh := make(chan bool)
-	watch(watchCh, watchDir)
+	watch(watchCh, c.WatchDir)
 
-	writeStatus(statusFile, "BUILDING")
-	buildResultCh, abortCh := build(buildDir, buildFile)
+	writeStatus(c.StatusFile, "BUILDING")
+	buildResultCh, abortCh := build(c.BuildDir, c.BuildFile)
 	active := true
 
 	for {
@@ -35,27 +45,52 @@ func main() {
 			fmt.Printf("<- change\n")
 			if active {
 				abortCh <- true
+
+				writeStatus(c.StatusFile, "CANCELING")
+
+				// Wait for the abort to effect.
+				res := <-buildResultCh
+				err := report(c, res)
+				if err != nil {
+					log.Print(err)
+				}
 			}
-			writeStatus(statusFile, "BUILDING")
-			buildResultCh, abortCh = build(buildDir, buildFile)
+
+			writeStatus(c.StatusFile, "BUILDING")
+			buildResultCh, abortCh = build(c.BuildDir, c.BuildFile)
+			active = true
 		case res := <-buildResultCh:
-			if res.Success {
-				writeStatus(statusFile, fmt.Sprintf("ok\n\n%v", res.Output))
-			} else {
-				writeStatus(statusFile, fmt.Sprintf("FAILED\n\n%v", res.Output))
+			err := report(c, res)
+			if err != nil {
+				log.Print(err)
 			}
-			fmt.Printf("<- build %v\n", res.Success)
 			active = false
 		}
 	}
+}
+
+func report(c Config, res BuildResult) error {
+	if res.Success {
+		writeStatus(c.StatusFile, fmt.Sprintf("ok\n\n%v", res.Output))
+	} else {
+		writeStatus(c.StatusFile, fmt.Sprintf("FAILED\n\n%v", res.Output))
+	}
+	fmt.Printf("<- build %v\n", res.Success)
+	return nil
 }
 
 func build(buildDir string, buildFile string) (<-chan BuildResult, chan<- bool) {
 	resultCh := make(chan BuildResult)
 	abortCh := make(chan bool)
 
+	err := justasec(buildFile)
+	if err != nil {
+		log.Print(err)
+	}
+
 	cmd := exec.Command("go", "install")
 	cmd.Dir = buildDir
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
@@ -66,7 +101,15 @@ func build(buildDir string, buildFile string) (<-chan BuildResult, chan<- bool) 
 
 	go func() {
 		<-abortCh
-		cmd.Process.Signal(os.Kill)
+		pgid, err := syscall.Getpgid(cmd.Process.Pid)
+		if err == nil {
+			syscall.Kill(-pgid, 15)
+		}
+		cmd.Wait()
+		resultCh<- BuildResult{
+			Success: false,
+			Output: "Build canceled",
+		}
 	}()
 
 	go func() {
@@ -109,4 +152,10 @@ func writeStatus(path string, status string) {
 	if err != nil {
 		fmt.Printf("WARN: could not write to status file\n")
 	}
+}
+
+func justasec(binpath string) error {
+	jaspath := "/Users/miles/go/bin/justasec"
+	cmd := exec.Command("cp", jaspath, binpath)
+	return cmd.Run()
 }
