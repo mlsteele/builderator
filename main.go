@@ -126,7 +126,10 @@ func build(buildDir string, buildFile string) (<-chan BuildResult, chan<- bool) 
 }
 
 func watch(ch chan<- bool, watchDir string) {
-	cmd := exec.Command("fswatch", watchDir, "--event", "Updated", "-l", "0.101")
+	cmd := exec.Command("fswatch", watchDir,
+		"--event", "Updated",
+		"--latency", "0.101",
+		"--one-per-batch")
 	cmd.Dir = watchDir
 
 	outReader, err := cmd.StdoutPipe()
