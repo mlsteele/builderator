@@ -4,17 +4,23 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
+	"github.com/BurntSushi/toml"
 	"io/ioutil"
-	"os/exec"
 	"log"
+	"os"
+	"os/exec"
+	"path"
 	"syscall"
 )
 
 type Config struct {
-	WatchDir string
-	BuildDir string
-	BuildFile string
-	StatusFile string
+	// Absolute path to the config file. Filled by the reader
+	ConfigPath string
+	// Paths are absoute-ified by the reader.
+	WatchDir    string
+	BuildCmdDir string
+	BuildFile   string
+	StatusFile  string
 }
 
 type BuildResult struct {
@@ -22,21 +28,58 @@ type BuildResult struct {
 	Output  string
 }
 
+// Find the absolute path to a config file.
+func FindConfig() (string, error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	return path.Join(cwd, ".builderator.toml"), nil
+}
+
+func ReadConfig(cpath string) (Config, error) {
+	var c Config
+
+	_, err := toml.DecodeFile(cpath, &c)
+	if err != nil {
+		return c, err
+	}
+
+	c.ConfigPath = path.Clean(cpath)
+	confdir := path.Dir(c.ConfigPath)
+	c.WatchDir = RerootPath(c.WatchDir, confdir)
+	c.BuildCmdDir = RerootPath(c.BuildCmdDir, confdir)
+	c.BuildFile = RerootPath(c.BuildFile, confdir)
+	c.StatusFile = RerootPath(c.StatusFile, confdir)
+
+	return c, nil
+}
+
+func RerootPath(in string, relto string) string {
+	if !path.IsAbs(in) {
+		in = path.Join(relto, in)
+	}
+	return path.Clean(in)
+}
+
 func main() {
 	// This method leaks goroutines.
 
-	c := Config{
-		WatchDir: "/Users/miles/go/src/github.com/keybase/client/go/",
-		BuildDir: "/Users/miles/go/src/github.com/keybase/client/go/keybase/",
-		BuildFile: "/Users/miles/go/bin/keybase",
-		StatusFile: "/tmp/buildstatus",
+	cpath, err := FindConfig()
+	if err != nil {
+		die2("Could not find config file", err)
+	}
+
+	c, err := ReadConfig(cpath)
+	if err != nil {
+		die2("Could not read config file", err)
 	}
 
 	watchCh := make(chan bool)
 	watch(watchCh, c.WatchDir)
 
 	writeStatus(c.StatusFile, "BUILDING")
-	buildResultCh, abortCh := build(c.BuildDir, c.BuildFile)
+	buildResultCh, abortCh := build(c.BuildCmdDir, c.BuildFile)
 	active := true
 
 	for {
@@ -57,7 +100,7 @@ func main() {
 			}
 
 			writeStatus(c.StatusFile, "BUILDING")
-			buildResultCh, abortCh = build(c.BuildDir, c.BuildFile)
+			buildResultCh, abortCh = build(c.BuildCmdDir, c.BuildFile)
 			active = true
 		case res := <-buildResultCh:
 			err := report(c, res)
@@ -106,9 +149,9 @@ func build(buildDir string, buildFile string) (<-chan BuildResult, chan<- bool) 
 			syscall.Kill(-pgid, 15)
 		}
 		cmd.Wait()
-		resultCh<- BuildResult{
+		resultCh <- BuildResult{
 			Success: false,
-			Output: "Build canceled",
+			Output:  "Build canceled",
 		}
 	}()
 
@@ -161,4 +204,9 @@ func justasec(binpath string) error {
 	jaspath := "/Users/miles/go/bin/justasec"
 	cmd := exec.Command("cp", jaspath, binpath)
 	return cmd.Run()
+}
+
+func die2(reason string, err error) {
+	fmt.Fprintf(os.Stderr, "%v: %v\n", reason, err)
+	os.Exit(1)
 }
