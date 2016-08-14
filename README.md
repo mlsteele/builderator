@@ -1,0 +1,3 @@
+# Builderator
+
+Continuous build runner.
