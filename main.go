@@ -11,6 +11,9 @@ import (
 	"os/exec"
 	"path"
 	"syscall"
+	"strings"
+	"errors"
+	"os/user"
 )
 
 type Config struct {
@@ -18,6 +21,7 @@ type Config struct {
 	ConfigPath string
 	// Paths are absoute-ified by the reader.
 	WatchDir    string
+	BuildCmd    string
 	BuildCmdDir string
 	BuildFile   string
 	StatusFile  string
@@ -38,6 +42,7 @@ func FindConfig() (string, error) {
 }
 
 func ReadConfig(cpath string) (Config, error) {
+	// TODO require all required fields
 	var c Config
 
 	_, err := toml.DecodeFile(cpath, &c)
@@ -55,11 +60,33 @@ func ReadConfig(cpath string) (Config, error) {
 	return c, nil
 }
 
-func RerootPath(in string, relto string) string {
-	if !path.IsAbs(in) {
-		in = path.Join(relto, in)
+func RerootPath(p string, relto string) string {
+	var err error
+	p, err = Homeopathy(p)
+	if err != nil {
+		die(fmt.Sprintf("Could not understand path %v: %v", p, err))
 	}
-	return path.Clean(in)
+	p = os.ExpandEnv(p)
+	if !path.IsAbs(p) {
+		p = path.Join(relto, p)
+	}
+	p = path.Clean(p)
+	return p
+}
+
+func Homeopathy(p string) (string, error) {
+	if p[:2] == "~/" {
+		usr, err := user.Current()
+		if err != nil {
+			return "", err
+		}
+		dir := usr.HomeDir
+		if len(dir) == 0 {
+			return "", errors.New("no user homedir set")
+		}
+		p = path.Join(dir, p[2:])
+	}
+	return p, nil
 }
 
 func main() {
@@ -67,7 +94,7 @@ func main() {
 
 	cpath, err := FindConfig()
 	if err != nil {
-		die2("Could not find config file", err)
+		die(fmt.Sprintf("Could not find config file: %v\n%v\n", cpath, err))
 	}
 
 	c, err := ReadConfig(cpath)
@@ -79,7 +106,7 @@ func main() {
 	watch(watchCh, c.WatchDir)
 
 	writeStatus(c.StatusFile, "BUILDING")
-	buildResultCh, abortCh := build(c.BuildCmdDir, c.BuildFile)
+	buildResultCh, abortCh := build(c)
 	active := true
 
 	for {
@@ -100,7 +127,7 @@ func main() {
 			}
 
 			writeStatus(c.StatusFile, "BUILDING")
-			buildResultCh, abortCh = build(c.BuildCmdDir, c.BuildFile)
+			buildResultCh, abortCh = build(c)
 			active = true
 		case res := <-buildResultCh:
 			err := report(c, res)
@@ -122,17 +149,27 @@ func report(c Config, res BuildResult) error {
 	return nil
 }
 
-func build(buildDir string, buildFile string) (<-chan BuildResult, chan<- bool) {
+// Kick off a single build run.
+// Returns channels to get the result and abort the build.
+// A single result is always returned on the resultCh even when aborted.
+// (There may be a race where two buildresults are returned in aborted)
+func build(c Config) (<-chan BuildResult, chan<- bool) {
 	resultCh := make(chan BuildResult)
 	abortCh := make(chan bool)
 
-	err := justasec(buildFile)
+	// Replace the target with justasec.
+	err := justasec(c.BuildFile)
 	if err != nil {
-		log.Print(err)
+		fmt.Fprintf(os.Stderr, "Could not replace with justasec: %v\n", err)
 	}
 
-	cmd := exec.Command("go", "install")
-	cmd.Dir = buildDir
+	// cmd := exec.Command("go", "install")
+	cmdparts := strings.Split(c.BuildCmd, " ")
+	if len(cmdparts) < 1 {
+		die(fmt.Sprintf("Invalid command: %v", cmdparts))
+	}
+	cmd := exec.Command(cmdparts[0], cmdparts[1:]...)
+	cmd.Dir = c.BuildCmdDir
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	var stdout bytes.Buffer
@@ -142,6 +179,7 @@ func build(buildDir string, buildFile string) (<-chan BuildResult, chan<- bool) 
 
 	cmd.Start()
 
+	// Receiver for aborting
 	go func() {
 		<-abortCh
 		pgid, err := syscall.Getpgid(cmd.Process.Pid)
@@ -155,8 +193,12 @@ func build(buildDir string, buildFile string) (<-chan BuildResult, chan<- bool) 
 		}
 	}()
 
+	// Receiver for completion
 	go func() {
 		exit := cmd.Wait()
+		if err != nil {
+			fmt.Printf("build exit: %v\n", exit)
+		}
 
 		res := BuildResult{
 			Success: exit == nil,
@@ -204,6 +246,11 @@ func justasec(binpath string) error {
 	jaspath := "/Users/miles/go/bin/justasec"
 	cmd := exec.Command("cp", jaspath, binpath)
 	return cmd.Run()
+}
+
+func die(reason string) {
+	fmt.Fprintf(os.Stderr, "%v\n", reason)
+	os.Exit(1)
 }
 
 func die2(reason string, err error) {
