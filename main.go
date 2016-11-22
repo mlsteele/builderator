@@ -3,17 +3,18 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"errors"
+	"flag"
 	"fmt"
 	"github.com/BurntSushi/toml"
 	"io/ioutil"
 	"log"
 	"os"
 	"os/exec"
-	"path"
-	"syscall"
-	"strings"
-	"errors"
 	"os/user"
+	"path"
+	"strings"
+	"syscall"
 )
 
 type Config struct {
@@ -75,7 +76,7 @@ func RerootPath(p string, relto string) string {
 }
 
 func Homeopathy(p string) (string, error) {
-	if p[:2] == "~/" {
+	homefirst := func(q string) (string, error) {
 		usr, err := user.Current()
 		if err != nil {
 			return "", err
@@ -84,17 +85,36 @@ func Homeopathy(p string) (string, error) {
 		if len(dir) == 0 {
 			return "", errors.New("no user homedir set")
 		}
-		p = path.Join(dir, p[2:])
+		return path.Join(dir, q), nil
 	}
+
+	switch {
+	case len(p) == 1 && p == "~":
+		return homefirst("")
+	case len(p) >= 2 && p[:2] == "~/":
+		return homefirst(p[2:])
+	}
+
 	return p, nil
 }
 
 func main() {
 	// This method leaks goroutines.
 
-	cpath, err := FindConfig()
-	if err != nil {
-		die(fmt.Sprintf("Could not find config file: %v\n%v\n", cpath, err))
+	var cpath0 string
+	flag.StringVar(&cpath0, "c", "", "Config file path")
+
+	flag.Parse()
+
+	var cpath string
+	if len(cpath0) == 0 {
+		foundpath, err := FindConfig()
+		if err != nil {
+			die(fmt.Sprintf("Could not find config file: %v\n%v\n", cpath, err))
+		}
+		cpath = foundpath
+	} else {
+		cpath = cpath0
 	}
 
 	c, err := ReadConfig(cpath)
