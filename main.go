@@ -6,7 +6,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"github.com/BurntSushi/toml"
 	"io/ioutil"
 	"log"
 	"os"
@@ -15,17 +14,36 @@ import (
 	"path"
 	"strings"
 	"syscall"
+
+	"github.com/BurntSushi/toml"
 )
 
+const (
+	CONF_NAME = ".builderator.toml"
+)
+
+// See example.toml for config specs.
+
+// RawConfig is the config before validation.
+// All paths are absolute or relative to the config file.
+type RawConfig struct {
+	WatchDir    *string
+	BuildCmd    *string
+	BuildCmdDir *string
+	StatusFile  *string
+	BuildFile   *string
+}
+
+// Validated config. All paths are absolute.
 type Config struct {
-	// Absolute path to the config file. Filled by the reader
+	// Absolute path to the config file.
 	ConfigPath string
-	// Paths are absoute-ified by the reader.
+
 	WatchDir    string
 	BuildCmd    string
 	BuildCmdDir string
-	BuildFile   string
-	StatusFile  string
+	StatusFile  *string
+	BuildFile   *string
 }
 
 type BuildResult struct {
@@ -34,47 +52,123 @@ type BuildResult struct {
 }
 
 // Find the absolute path to a config file.
+// Walks up the filesystem looking for a file named CONF_NAME
 func FindConfig() (string, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return "", err
 	}
-	return path.Join(cwd, ".builderator.toml"), nil
+	dir := cwd
+	prev := cwd + "hack"
+	limit := 64
+	for {
+		limit--
+		if limit <= 0 || dir == prev {
+			return "", fmt.Errorf("no config file (%v) found", CONF_NAME)
+		}
+		// fmt.Printf("@@@ looking in: %v\n", dir)
+		cpath := path.Join(dir, CONF_NAME)
+		stat, err := os.Stat(cpath)
+		if err == nil && !stat.IsDir() {
+			return cpath, nil
+		}
+		prev = dir
+		dir = path.Dir(dir)
+	}
 }
 
 func ReadConfig(cpath string) (Config, error) {
-	// TODO require all required fields
+	var rc RawConfig
 	var c Config
 
-	_, err := toml.DecodeFile(cpath, &c)
+	if !path.IsAbs(cpath) {
+		return c, fmt.Errorf("config path must be absolute: %v", cpath)
+	}
+
+	_, err := toml.DecodeFile(cpath, &rc)
 	if err != nil {
 		return c, err
 	}
 
 	c.ConfigPath = path.Clean(cpath)
 	confdir := path.Dir(c.ConfigPath)
-	c.WatchDir = RerootPath(c.WatchDir, confdir)
-	c.BuildCmdDir = RerootPath(c.BuildCmdDir, confdir)
-	c.BuildFile = RerootPath(c.BuildFile, confdir)
-	c.StatusFile = RerootPath(c.StatusFile, confdir)
+
+	if rc.WatchDir == nil {
+		return c, fmt.Errorf("missing required config value: WatchDir")
+	}
+	c.WatchDir, err = RerootPath(*rc.WatchDir, confdir)
+	if err != nil {
+		return c, err
+	}
+
+	if rc.BuildCmd == nil {
+		return c, fmt.Errorf("missing required config value: BuildCmd")
+	}
+	c.BuildCmd = *rc.BuildCmd
+
+	c.BuildCmdDir = confdir
+	if rc.BuildCmdDir != nil {
+		c.BuildCmdDir, err = RerootPath(*rc.BuildCmdDir, confdir)
+		if err != nil {
+			return c, err
+		}
+	}
+
+	if rc.StatusFile != nil {
+		s, err := RerootPath(*rc.StatusFile, confdir)
+		if err != nil {
+			return c, err
+		}
+		c.StatusFile = &s
+	}
+
+	if rc.BuildFile != nil {
+		s, err := RerootPath(*rc.BuildFile, confdir)
+		if err != nil {
+			return c, err
+		}
+		c.BuildFile = &s
+	}
 
 	return c, nil
 }
 
-func RerootPath(p string, relto string) string {
+func PrintConfig(c Config) {
+	pf := func(a string, b string) {
+		fmt.Printf("%s:\n  %s\n", a, b)
+	}
+	pfo := func(a string, b *string) {
+		if b == nil {
+			fmt.Printf("%s: None", a)
+		} else {
+			pf(a, *b)
+		}
+	}
+	pf("WatchDir", c.WatchDir)
+	pf("BuildCmd", c.BuildCmd)
+	pf("BuildCmdDir", c.BuildCmdDir)
+	pfo("StatusFile", c.StatusFile)
+	pfo("BuildFile", c.BuildFile)
+}
+
+// RerootPath takes a path and makes sure it's absolute.
+// If it was relative, it is treated as relative to relto.
+func RerootPath(p string, relto string) (string, error) {
 	var err error
 	p, err = Homeopathy(p)
 	if err != nil {
-		die(fmt.Sprintf("Could not understand path %v: %v", p, err))
+		return "", err
 	}
 	p = os.ExpandEnv(p)
 	if !path.IsAbs(p) {
 		p = path.Join(relto, p)
 	}
 	p = path.Clean(p)
-	return p
+	return p, nil
 }
 
+// Homeopathy takes a path and expands the ~ part of it if there is one.
+// It is not always possible to do this, or so they say.
 func Homeopathy(p string) (string, error) {
 	homefirst := func(q string) (string, error) {
 		usr, err := user.Current()
@@ -103,6 +197,11 @@ func main() {
 
 	var cpath0 string
 	flag.StringVar(&cpath0, "c", "", "Config file path")
+	var dryrun bool
+	flag.BoolVar(&dryrun, "n", false, "Dryrun: print parsed config and exit")
+	var once bool
+	flag.BoolVar(&once, "o", false, "Once: Run the build command once and exit")
+	// TODO add flag --quiet silences the output unless there's an error
 
 	flag.Parse()
 
@@ -110,11 +209,18 @@ func main() {
 	if len(cpath0) == 0 {
 		foundpath, err := FindConfig()
 		if err != nil {
-			die(fmt.Sprintf("Could not find config file: %v\n%v\n", cpath, err))
+			die(fmt.Sprintf("Could not find config file: %v\n", err))
 		}
 		cpath = foundpath
 	} else {
-		cpath = cpath0
+		cwd, err := os.Getwd()
+		if err != nil {
+			die(fmt.Sprintf("Could not get cwd"))
+		}
+		cpath, err = RerootPath(cpath0, cwd)
+		if err != nil {
+			die(fmt.Sprintf("Could not find config file: %v\n", err))
+		}
 	}
 
 	c, err := ReadConfig(cpath)
@@ -122,10 +228,21 @@ func main() {
 		die2("Could not read config file", err)
 	}
 
+	if dryrun {
+		fmt.Fprintf(os.Stderr, "Config path:\n  %v\n", cpath)
+		PrintConfig(c)
+		fmt.Fprintf(os.Stderr, "\nDryrun complete\n")
+		return
+	}
+
+	PrintConfig(c)
+
 	watchCh := make(chan bool)
 	watch(watchCh, c.WatchDir)
 
-	writeStatus(c.StatusFile, "BUILDING")
+	if c.StatusFile != nil {
+		writeStatus(*c.StatusFile, "BUILDING")
+	}
 	buildResultCh, abortCh := build(c)
 	active := true
 
@@ -136,7 +253,9 @@ func main() {
 			if active {
 				abortCh <- true
 
-				writeStatus(c.StatusFile, "CANCELING")
+				if c.StatusFile != nil {
+					writeStatus(*c.StatusFile, "CANCELING")
+				}
 
 				// Wait for the abort to effect.
 				res := <-buildResultCh
@@ -144,9 +263,14 @@ func main() {
 				if err != nil {
 					log.Print(err)
 				}
+				if once {
+					return
+				}
 			}
 
-			writeStatus(c.StatusFile, "BUILDING")
+			if c.StatusFile != nil {
+				writeStatus(*c.StatusFile, "BUILDING")
+			}
 			buildResultCh, abortCh = build(c)
 			active = true
 		case res := <-buildResultCh:
@@ -155,15 +279,22 @@ func main() {
 				log.Print(err)
 			}
 			active = false
+			if once {
+				return
+			}
 		}
 	}
 }
 
 func report(c Config, res BuildResult) error {
 	if res.Success {
-		writeStatus(c.StatusFile, fmt.Sprintf("ok\n\n%v", res.Output))
+		if c.StatusFile != nil {
+			writeStatus(*c.StatusFile, fmt.Sprintf("ok\n\n%v", res.Output))
+		}
 	} else {
-		writeStatus(c.StatusFile, fmt.Sprintf("FAILED\n\n%v", res.Output))
+		if c.StatusFile != nil {
+			writeStatus(*c.StatusFile, fmt.Sprintf("FAILED\n\n%v", res.Output))
+		}
 	}
 	fmt.Printf("<- build %v\n", res.Success)
 	return nil
@@ -178,9 +309,11 @@ func build(c Config) (<-chan BuildResult, chan<- bool) {
 	abortCh := make(chan bool)
 
 	// Replace the target with justasec.
-	err := justasec(c.BuildFile)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Could not replace with justasec: %v\n", err)
+	if c.BuildFile != nil {
+		err := justasec(*c.BuildFile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Could not replace with justasec: %v\n", err)
+		}
 	}
 
 	// cmd := exec.Command("go", "install")
@@ -216,7 +349,7 @@ func build(c Config) (<-chan BuildResult, chan<- bool) {
 	// Receiver for completion
 	go func() {
 		exit := cmd.Wait()
-		if err != nil {
+		if exit != nil {
 			fmt.Printf("build exit: %v\n", exit)
 		}
 

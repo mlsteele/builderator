@@ -1,0 +1,16 @@
+# Example builderator toml file.
+# To use: cp example.toml .builderator.toml
+
+# All relative paths are relative to this config file.
+# Note: If `WatchDir` includes `BuildFile` or `StatusFile` then a rebuild will be triggered indefinitely.
+
+# Directory to watch for changes.
+WatchDir    = "."
+# Command to run when files change. (Can be a script like "./compile.sh")
+BuildCmd    = "go install"
+# (Optional) Working directory for BuildCmd.
+BuildCmdDir = "."
+# (Optional) File to write build status and output to.
+StatusFile  = "/tmp/buildstatus-builderator"
+# (Optional) Target binary to replace with 'justasec' before each build.
+BuildFile   = "~/go/bin/builderator"
