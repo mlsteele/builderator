@@ -139,7 +139,7 @@ func PrintConfig(c Config) {
 	}
 	pfo := func(a string, b *string) {
 		if b == nil {
-			fmt.Printf("%s: None", a)
+			fmt.Printf("%s: None\n", a)
 		} else {
 			pf(a, *b)
 		}
@@ -192,8 +192,15 @@ func Homeopathy(p string) (string, error) {
 	return p, nil
 }
 
+func usage() {
+	fmt.Printf("Usage: %s\n       %s mon\n", os.Args[0], os.Args[0])
+	flag.PrintDefaults()
+}
+
 func main() {
 	// This method leaks goroutines.
+
+	flag.Usage = usage
 
 	var cpath0 string
 	flag.StringVar(&cpath0, "c", "", "Config file path")
@@ -204,6 +211,17 @@ func main() {
 	// TODO add flag --quiet silences the output unless there's an error
 
 	flag.Parse()
+
+	mon := false
+
+	switch {
+	case flag.NArg() == 0:
+	case flag.NArg() == 1 && flag.Arg(0) == "mon":
+		mon = true
+	default:
+		usage()
+		die("Incorrect usage")
+	}
 
 	var cpath string
 	if len(cpath0) == 0 {
@@ -226,6 +244,22 @@ func main() {
 	c, err := ReadConfig(cpath)
 	if err != nil {
 		die2("Could not read config file", err)
+	}
+
+	if mon {
+		monitor(c)
+		return
+	}
+
+	switch flag.NArg() {
+	case 0:
+	case 1:
+		if flag.Arg(0) == "mon" {
+			die("mon not implemented")
+		} else {
+			usage()
+			die("Incorrect usage")
+		}
 	}
 
 	if dryrun {
@@ -385,6 +419,28 @@ func watch(ch chan<- bool, watchDir string) {
 
 	cmd.Start()
 
+}
+
+func monitor(c Config) {
+	if c.StatusFile == nil {
+		die("Config.StatusFile required for Monitor mode")
+	}
+
+	binary, err := exec.LookPath("watch")
+	if err != nil {
+		die(fmt.Sprintf("could not find watch program: %s", err))
+	}
+
+	// TODO this is broken
+	die("not implemented")
+
+	env := os.Environ()
+	args := []string{binary, "-n", ".1", *c.StatusFile}
+	log.Printf("%+v", args)
+	err = syscall.Exec(binary, args, env)
+	if err != nil {
+		die(fmt.Sprintf("error running watch: %s", err))
+	}
 }
 
 func writeStatus(path string, status string) {
