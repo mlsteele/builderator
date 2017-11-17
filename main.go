@@ -24,6 +24,24 @@ const (
 
 // See example.toml for config specs.
 
+const STARTER_CONFIG = `# All relative paths are relative to this config file.
+
+# Directory to watch for changes.
+WatchDir    = "."
+
+# Command to run when files change. (Can be a script like "./compile.sh")
+BuildCmd    = "go install"
+
+# (Optional) Working directory for BuildCmd.
+BuildCmdDir = "."
+
+# (Optional) File to write build status and output to.
+StatusFile  = "/tmp/buildstatus-builderator"
+
+# (Optional) Target binary to replace with 'justasec' before each build.
+BuildFile   = "~/go/bin/builderator"
+`
+
 // RawConfig is the config before validation.
 // All paths are absolute or relative to the config file.
 type RawConfig struct {
@@ -51,20 +69,30 @@ type BuildResult struct {
 	Output  string
 }
 
+type ConfigNotFoundError struct{}
+
+func NewConfigNotFoundError() error {
+	return ConfigNotFoundError{}
+}
+
+func (e ConfigNotFoundError) Error() string {
+	return fmt.Sprintf("no config file (%v) found", CONF_NAME)
+}
+
 // Find the absolute path to a config file.
 // Walks up the filesystem looking for a file named CONF_NAME
-func FindConfig() (string, error) {
+// `limit` is how many directories up to search. 1 only looks in cwd.
+func FindConfig(limit int) (string, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return "", err
 	}
 	dir := cwd
 	prev := cwd + "hack"
-	limit := 64
 	for {
 		limit--
-		if limit <= 0 || dir == prev {
-			return "", fmt.Errorf("no config file (%v) found", CONF_NAME)
+		if limit < 0 || dir == prev {
+			return "", NewConfigNotFoundError()
 		}
 		// fmt.Printf("@@@ looking in: %v\n", dir)
 		cpath := path.Join(dir, CONF_NAME)
@@ -204,6 +232,8 @@ func main() {
 
 	var cpath0 string
 	flag.StringVar(&cpath0, "c", "", "Config file path")
+	var generateStarter bool
+	flag.BoolVar(&generateStarter, "g", false, "Generate: create a .builderator.toml with a default config")
 	var dryrun bool
 	flag.BoolVar(&dryrun, "n", false, "Dryrun: print parsed config and exit")
 	var once bool
@@ -223,9 +253,17 @@ func main() {
 		die("Incorrect usage")
 	}
 
+	if generateStarter {
+		err := generate()
+		if err != nil {
+			die(fmt.Sprintf("Could not generate config: %v\n", err))
+		}
+		return
+	}
+
 	var cpath string
 	if len(cpath0) == 0 {
-		foundpath, err := FindConfig()
+		foundpath, err := FindConfig(64)
 		if err != nil {
 			die(fmt.Sprintf("Could not find config file: %v\n", err))
 		}
@@ -318,6 +356,26 @@ func main() {
 			}
 		}
 	}
+}
+
+func generate() error {
+	// Make sure a config doesn't already exist in this directory.
+	_, err := FindConfig(1)
+	switch err.(type) {
+	case ConfigNotFoundError:
+		// good
+	case nil:
+		return fmt.Errorf("Config already exists in this directory")
+	default:
+		return err
+	}
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+	cpath := path.Join(cwd, CONF_NAME)
+	return ioutil.WriteFile(cpath, []byte(STARTER_CONFIG), 0644)
 }
 
 func report(c Config, res BuildResult) error {
