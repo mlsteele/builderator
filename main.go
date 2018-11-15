@@ -12,6 +12,9 @@ import (
 	"os/exec"
 	"os/user"
 	"path"
+	"path/filepath"
+	"runtime"
+	"strings"
 	"syscall"
 
 	"github.com/BurntSushi/toml"
@@ -515,9 +518,81 @@ func writeStatus(path string, status string) {
 }
 
 func justasec(binpath string) error {
-	jaspath := "/Users/miles/go/bin/justasec"
-	cmd := exec.Command("cp", jaspath, binpath)
+	jaspath, err := which("justasec")
+	if err != nil {
+		return err
+	}
+	if jaspath == nil {
+		return fmt.Errorf("could not find 'jusatsec' in PATH")
+	}
+	cmd := exec.Command("cp", *jaspath, binpath)
 	return cmd.Run()
+}
+
+// which finds the full path of an executable.
+// Similar to `which` in bash but not perfect.
+// Does not ignore files that you don't have permission to execute if anyone does.
+// Fumbles relative paths.
+func which(name string) (*string, error) {
+	directlyExecutable, err := isExecutable(name)
+	if err != nil {
+		return nil, err
+	}
+	if directlyExecutable {
+		path, err := filepath.Abs(name)
+		if err != nil {
+			return nil, err
+		}
+		return &path, nil
+	}
+	pathDirs := strings.Split(os.Getenv("PATH"), string(os.PathListSeparator))
+	for _, dirPath := range pathDirs {
+		info, err := os.Stat(dirPath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return nil, fmt.Errorf("error in stat %v: %v", dirPath, err)
+		}
+		if !info.IsDir() {
+			continue
+		}
+		files, err := ioutil.ReadDir(dirPath)
+		if err != nil {
+			return nil, fmt.Errorf("error in read dir %v: %v", dirPath, err)
+		}
+		for _, f := range files {
+			if f.Name() != name {
+				continue
+			}
+			path, err := filepath.Abs(filepath.Join(dirPath, f.Name()))
+			if err != nil {
+				return nil, err
+			}
+			executable, err := isExecutable(path)
+			if err != nil {
+				return nil, err
+			}
+			if executable {
+				return &path, nil
+			}
+		}
+	}
+	return nil, nil
+}
+
+func isExecutable(path string) (bool, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	if runtime.GOOS == "windows" {
+		return true, nil
+	}
+	return info.Mode()&0111 != 0, nil
 }
 
 func die(reason string) {
