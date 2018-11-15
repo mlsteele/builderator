@@ -12,7 +12,6 @@ import (
 	"os/exec"
 	"os/user"
 	"path"
-	"strings"
 	"syscall"
 
 	"github.com/BurntSushi/toml"
@@ -264,7 +263,12 @@ func main() {
 	var cpath string
 	if len(cpath0) == 0 {
 		foundpath, err := FindConfig(64)
-		if err != nil {
+		switch err := err.(type) {
+		case nil:
+		case ConfigNotFoundError:
+			fmt.Fprintf(os.Stderr, "%v\nTo generate a template run: builderator -g\n", err)
+			os.Exit(1)
+		default:
 			die(fmt.Sprintf("Could not find config file: %v\n", err))
 		}
 		cpath = foundpath
@@ -409,11 +413,12 @@ func build(c Config) (<-chan BuildResult, chan<- bool) {
 	}
 
 	// cmd := exec.Command("go", "install")
-	cmdparts := strings.Split(c.BuildCmd, " ")
-	if len(cmdparts) < 1 {
-		die(fmt.Sprintf("Invalid command: %v", cmdparts))
-	}
-	cmd := exec.Command(cmdparts[0], cmdparts[1:]...)
+	// cmdparts := strings.Split(c.BuildCmd, " ")
+	// if len(cmdparts) < 1 {
+	// 	die(fmt.Sprintf("Invalid command: %v", cmdparts))
+	// }
+	// cmd := exec.Command(cmdparts[0], cmdparts[1:]...)
+	cmd := exec.Command("bash", "-c", c.BuildCmd)
 	cmd.Dir = c.BuildCmdDir
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
