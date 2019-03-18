@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -42,16 +43,20 @@ StatusFile  = "/tmp/buildstatus-builderator"
 
 # (Optional) Target binary to replace with 'justasec' before each build.
 BuildFile   = "~/go/bin/builderator"
+
+# (Optional) UDP Port for controlling AnyBar.
+StatusBarPort = 1738
 `
 
 // RawConfig is the config before validation.
 // All paths are absolute or relative to the config file.
 type RawConfig struct {
-	WatchDir    *string
-	BuildCmd    *string
-	BuildCmdDir *string
-	StatusFile  *string
-	BuildFile   *string
+	WatchDir      *string
+	BuildCmd      *string
+	BuildCmdDir   *string
+	StatusFile    *string
+	BuildFile     *string
+	StatusBarPort int
 }
 
 // Validated config. All paths are absolute.
@@ -59,11 +64,12 @@ type Config struct {
 	// Absolute path to the config file.
 	ConfigPath string
 
-	WatchDir    string
-	BuildCmd    string
-	BuildCmdDir string
-	StatusFile  *string
-	BuildFile   *string
+	WatchDir      string
+	BuildCmd      string
+	BuildCmdDir   string
+	StatusFile    *string
+	BuildFile     *string
+	StatusBarPort int
 }
 
 type BuildResult struct {
@@ -160,6 +166,8 @@ func ReadConfig(cpath string) (Config, error) {
 		c.BuildFile = &s
 	}
 
+	c.StatusBarPort = rc.StatusBarPort
+
 	return c, nil
 }
 
@@ -228,6 +236,15 @@ func usage() {
 }
 
 func main() {
+	var app App
+	app.main()
+}
+
+type App struct {
+	statusBar *StatusBar
+}
+
+func (a *App) main() {
 	// This method leaks goroutines.
 
 	flag.Usage = usage
@@ -307,6 +324,11 @@ func main() {
 		}
 	}
 
+	if c.StatusBarPort > 0 {
+		a.statusBar = NewStatusBar(c.StatusBarPort)
+	}
+	a.setStatusBar(StatusBarBlue)
+
 	if dryrun {
 		fmt.Fprintf(os.Stderr, "Config path:\n  %v\n", cpath)
 		PrintConfig(c)
@@ -321,6 +343,7 @@ func main() {
 
 	if c.StatusFile != nil {
 		writeStatus(*c.StatusFile, "BUILDING")
+		a.setStatusBar(StatusBarBlue)
 	}
 	buildResultCh, abortCh := build(c)
 	active := true
@@ -334,11 +357,12 @@ func main() {
 
 				if c.StatusFile != nil {
 					writeStatus(*c.StatusFile, "CANCELING")
+					a.setStatusBar(StatusBarOrange)
 				}
 
 				// Wait for the abort to effect.
 				res := <-buildResultCh
-				err := report(c, res)
+				err := a.report(c, res)
 				if err != nil {
 					log.Print(err)
 				}
@@ -349,11 +373,12 @@ func main() {
 
 			if c.StatusFile != nil {
 				writeStatus(*c.StatusFile, "BUILDING")
+				a.setStatusBar(StatusBarBlue)
 			}
 			buildResultCh, abortCh = build(c)
 			active = true
 		case res := <-buildResultCh:
-			err := report(c, res)
+			err := a.report(c, res)
 			if err != nil {
 				log.Print(err)
 			}
@@ -363,6 +388,30 @@ func main() {
 			}
 		}
 	}
+}
+
+func (a *App) setStatusBar(style string) {
+	go func() {
+		if a.statusBar != nil {
+			_ = a.statusBar.Set(context.Background(), style)
+		}
+	}()
+}
+
+func (a *App) report(c Config, res BuildResult) error {
+	if res.Success {
+		if c.StatusFile != nil {
+			writeStatus(*c.StatusFile, fmt.Sprintf("ok\n\n%v", res.Output))
+			a.setStatusBar(StatusBarBlack)
+		}
+	} else {
+		if c.StatusFile != nil {
+			writeStatus(*c.StatusFile, fmt.Sprintf("FAILED\n\n%v", res.Output))
+			a.setStatusBar(StatusBarRed)
+		}
+	}
+	fmt.Printf("<- build %v\n", res.Success)
+	return nil
 }
 
 func generate() error {
@@ -383,20 +432,6 @@ func generate() error {
 	}
 	cpath := path.Join(cwd, CONF_NAME)
 	return ioutil.WriteFile(cpath, []byte(STARTER_CONFIG), 0644)
-}
-
-func report(c Config, res BuildResult) error {
-	if res.Success {
-		if c.StatusFile != nil {
-			writeStatus(*c.StatusFile, fmt.Sprintf("ok\n\n%v", res.Output))
-		}
-	} else {
-		if c.StatusFile != nil {
-			writeStatus(*c.StatusFile, fmt.Sprintf("FAILED\n\n%v", res.Output))
-		}
-	}
-	fmt.Printf("<- build %v\n", res.Success)
-	return nil
 }
 
 // Kick off a single build run.
