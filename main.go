@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 
 	"github.com/BurntSushi/toml"
@@ -435,11 +436,10 @@ func generate() error {
 }
 
 // Kick off a single build run.
-// Returns channels to get the result and abort the build.
+// Returns channels to get the result and to abort the build.
 // A single result is always returned on the resultCh even when aborted.
-// (There may be a race where two buildresults are returned in aborted)
-func build(c Config) (<-chan BuildResult, chan<- bool) {
-	resultCh := make(chan BuildResult)
+func build(c Config) (<-chan BuildResult, chan<- struct{}) {
+	resultCh := make(chan BuildResult, 1)
 	abortCh := make(chan bool)
 
 	// Replace the target with justasec.
@@ -450,12 +450,6 @@ func build(c Config) (<-chan BuildResult, chan<- bool) {
 		}
 	}
 
-	// cmd := exec.Command("go", "install")
-	// cmdparts := strings.Split(c.BuildCmd, " ")
-	// if len(cmdparts) < 1 {
-	// 	die(fmt.Sprintf("Invalid command: %v", cmdparts))
-	// }
-	// cmd := exec.Command(cmdparts[0], cmdparts[1:]...)
 	cmd := exec.Command("bash", "-c", c.BuildCmd)
 	cmd.Dir = c.BuildCmdDir
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -465,7 +459,18 @@ func build(c Config) (<-chan BuildResult, chan<- bool) {
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 
-	cmd.Start()
+	err := cmd.Start()
+	if err != nil {
+		go func() {
+			resultCh <- BuildResult{
+				Success: false,
+				Output:  fmt.Sprintf("Build failed to start: %v", err),
+			}
+		}()
+		return
+	}
+
+	var sendResultOnce sync.Once
 
 	// Receiver for aborting
 	go func() {
@@ -475,10 +480,12 @@ func build(c Config) (<-chan BuildResult, chan<- bool) {
 			syscall.Kill(-pgid, 15)
 		}
 		cmd.Wait()
-		resultCh <- BuildResult{
-			Success: false,
-			Output:  "Build canceled",
-		}
+		sendResultOnce.Do(func() {
+			resultCh <- BuildResult{
+				Success: false,
+				Output:  "Build canceled",
+			}
+		})
 	}()
 
 	// Receiver for completion
@@ -487,18 +494,21 @@ func build(c Config) (<-chan BuildResult, chan<- bool) {
 		if exit != nil {
 			fmt.Printf("build exit: %v\n", exit)
 		}
-
-		res := BuildResult{
-			Success: exit == nil,
-			Output:  fmt.Sprintf("%v%v", string(stdout.Bytes()), string(stderr.Bytes())),
-		}
-		resultCh <- res
+		sendResultOnce.Do(func() {
+			resultCh <- BuildResult{
+				Success: exit == nil,
+				Output:  fmt.Sprintf("%v%v", string(stdout.Bytes()), string(stderr.Bytes())),
+			}
+		})
 	}()
 
 	return resultCh, abortCh
 }
 
-func watch(ch chan<- bool, watchDir string) {
+// Spawn a process to watch a directory for changes.
+// Sends into the `ch` whenever there is a change.
+// Returns quick.
+func watch(ch chan<- struct{}, watchDir string) {
 	cmd := exec.Command("fswatch", watchDir,
 		"--event", "Updated",
 		"--latency", "0.101",
@@ -514,12 +524,11 @@ func watch(ch chan<- bool, watchDir string) {
 	go func() {
 		for outScanner.Scan() {
 			_ = outScanner.Text()
-			ch <- true
+			ch <- struct{}{}
 		}
 	}()
 
 	cmd.Start()
-
 }
 
 func monitor(c Config) {
