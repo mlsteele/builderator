@@ -103,7 +103,7 @@ func FindConfig(limit int) (string, error) {
 		if limit < 0 || dir == prev {
 			return "", NewConfigNotFoundError()
 		}
-		// fmt.Printf("@@@ looking in: %v\n", dir)
+		// logInfo("@@@ looking in: %v\n", dir)
 		cpath := path.Join(dir, CONF_NAME)
 		stat, err := os.Stat(cpath)
 		if err == nil && !stat.IsDir() {
@@ -174,11 +174,11 @@ func ReadConfig(cpath string) (Config, error) {
 
 func PrintConfig(c Config) {
 	pf := func(a string, b string) {
-		fmt.Printf("%s:\n  %s\n", a, b)
+		logInfo("%s:\n  %s\n", a, b)
 	}
 	pfo := func(a string, b *string) {
 		if b == nil {
-			fmt.Printf("%s: None\n", a)
+			logInfo("%s: None\n", a)
 		} else {
 			pf(a, *b)
 		}
@@ -232,7 +232,7 @@ func Homeopathy(p string) (string, error) {
 }
 
 func usage() {
-	fmt.Printf("Usage: %s\n       %s mon\n", os.Args[0], os.Args[0])
+	logInfo("Usage: %s\n       %s mon\n", os.Args[0], os.Args[0])
 	flag.PrintDefaults()
 }
 
@@ -339,7 +339,7 @@ func (a *App) main() {
 
 	PrintConfig(c)
 
-	watchCh := make(chan bool)
+	watchCh := make(chan struct{})
 	watch(watchCh, c.WatchDir)
 
 	if c.StatusFile != nil {
@@ -352,9 +352,9 @@ func (a *App) main() {
 	for {
 		select {
 		case <-watchCh:
-			fmt.Printf("<- change\n")
+			logInfo("files changed")
 			if active {
-				abortCh <- true
+				abortCh <- struct{}{}
 
 				if c.StatusFile != nil {
 					writeStatus(*c.StatusFile, "CANCELING")
@@ -411,7 +411,11 @@ func (a *App) report(c Config, res BuildResult) error {
 			a.setStatusBar(StatusBarRed)
 		}
 	}
-	fmt.Printf("<- build %v\n", res.Success)
+	if res.Success {
+		logInfo("✓")
+	} else {
+		logInfo("✗ build failed: %v", res.Output)
+	}
 	return nil
 }
 
@@ -440,7 +444,7 @@ func generate() error {
 // A single result is always returned on the resultCh even when aborted.
 func build(c Config) (<-chan BuildResult, chan<- struct{}) {
 	resultCh := make(chan BuildResult, 1)
-	abortCh := make(chan bool)
+	abortCh := make(chan struct{}, 1)
 
 	// Replace the target with justasec.
 	if c.BuildFile != nil {
@@ -461,13 +465,11 @@ func build(c Config) (<-chan BuildResult, chan<- struct{}) {
 
 	err := cmd.Start()
 	if err != nil {
-		go func() {
-			resultCh <- BuildResult{
-				Success: false,
-				Output:  fmt.Sprintf("Build failed to start: %v", err),
-			}
-		}()
-		return
+		resultCh <- BuildResult{
+			Success: false,
+			Output:  fmt.Sprintf("Build failed to start: %v", err),
+		}
+		return resultCh, abortCh
 	}
 
 	var sendResultOnce sync.Once
@@ -479,8 +481,8 @@ func build(c Config) (<-chan BuildResult, chan<- struct{}) {
 		if err == nil {
 			syscall.Kill(-pgid, 15)
 		}
-		cmd.Wait()
 		sendResultOnce.Do(func() {
+			cmd.Wait()
 			resultCh <- BuildResult{
 				Success: false,
 				Output:  "Build canceled",
@@ -491,13 +493,10 @@ func build(c Config) (<-chan BuildResult, chan<- struct{}) {
 	// Receiver for completion
 	go func() {
 		exit := cmd.Wait()
-		if exit != nil {
-			fmt.Printf("build exit: %v\n", exit)
-		}
 		sendResultOnce.Do(func() {
 			resultCh <- BuildResult{
 				Success: exit == nil,
-				Output:  fmt.Sprintf("%v%v", string(stdout.Bytes()), string(stderr.Bytes())),
+				Output:  fmt.Sprintf("exit error %v stdout:'%v' stderr:'%v'", exit, string(stdout.Bytes()), string(stderr.Bytes())),
 			}
 		})
 	}()
@@ -557,7 +556,7 @@ func writeStatus(path string, status string) {
 	b := []byte(status)
 	err := ioutil.WriteFile(path, b, 0644)
 	if err != nil {
-		fmt.Printf("WARN: could not write to status file\n")
+		logInfo("WARN: could not write to status file\n")
 	}
 }
 
@@ -647,4 +646,8 @@ func die(reason string) {
 func die2(reason string, err error) {
 	fmt.Fprintf(os.Stderr, "%v: %v\n", reason, err)
 	os.Exit(1)
+}
+
+func logInfo(format string, args ...interface{}) {
+	fmt.Printf(format+"\n", args...)
 }
