@@ -74,8 +74,8 @@ type Config struct {
 }
 
 type BuildResult struct {
-	Success bool
-	Output  string
+	Error  error
+	Output string
 }
 
 type ConfigNotFoundError struct{}
@@ -400,7 +400,7 @@ func (a *App) setStatusBar(style string) {
 }
 
 func (a *App) report(c Config, res BuildResult) error {
-	if res.Success {
+	if res.Error == nil {
 		if c.StatusFile != nil {
 			writeStatus(*c.StatusFile, fmt.Sprintf("ok\n\n%v", res.Output))
 			a.setStatusBar(StatusBarBlack)
@@ -411,10 +411,10 @@ func (a *App) report(c Config, res BuildResult) error {
 			a.setStatusBar(StatusBarRed)
 		}
 	}
-	if res.Success {
+	if res.Error == nil {
 		logInfo("✓")
 	} else {
-		logInfo("✗ build failed: %v", res.Output)
+		logInfo("✗ build failed: %v %v", res.Error, res.Output)
 	}
 	return nil
 }
@@ -466,8 +466,8 @@ func build(c Config) (<-chan BuildResult, chan<- struct{}) {
 	err := cmd.Start()
 	if err != nil {
 		resultCh <- BuildResult{
-			Success: false,
-			Output:  fmt.Sprintf("Build failed to start: %v", err),
+			Error:  fmt.Errorf("Build failed to start: %v", err),
+			Output: "",
 		}
 		return resultCh, abortCh
 	}
@@ -484,8 +484,8 @@ func build(c Config) (<-chan BuildResult, chan<- struct{}) {
 		sendResultOnce.Do(func() {
 			cmd.Wait()
 			resultCh <- BuildResult{
-				Success: false,
-				Output:  "Build canceled",
+				Error:  fmt.Errorf("Build canceled"),
+				Output: "",
 			}
 		})
 	}()
@@ -495,8 +495,8 @@ func build(c Config) (<-chan BuildResult, chan<- struct{}) {
 		exit := cmd.Wait()
 		sendResultOnce.Do(func() {
 			resultCh <- BuildResult{
-				Success: exit == nil,
-				Output:  fmt.Sprintf("exit error %v stdout:'%v' stderr:'%v'", exit, string(stdout.Bytes()), string(stderr.Bytes())),
+				Error:  exit,
+				Output: fmt.Sprintf("%v%v", string(stdout.Bytes()), string(stderr.Bytes())),
 			}
 		})
 	}()
