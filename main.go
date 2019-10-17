@@ -340,7 +340,11 @@ func (a *App) main() {
 	PrintConfig(c)
 
 	watchCh := make(chan struct{})
-	watch(watchCh, c.WatchDir)
+	err = watch(watchCh, c.WatchDir)
+	if err != nil {
+		die(fmt.Sprintf("Could not start watcher: %v\n", err))
+		return
+	}
 
 	if c.StatusFile != nil {
 		writeStatus(*c.StatusFile, "BUILDING")
@@ -507,7 +511,7 @@ func build(c Config) (<-chan BuildResult, chan<- struct{}) {
 // Spawn a process to watch a directory for changes.
 // Sends into the `ch` whenever there is a change.
 // Returns quick.
-func watch(ch chan<- struct{}, watchDir string) {
+func watch(ch chan<- struct{}, watchDir string) error {
 	cmd := exec.Command("fswatch", watchDir,
 		"--event", "Updated",
 		"--latency", "0.101",
@@ -527,7 +531,7 @@ func watch(ch chan<- struct{}, watchDir string) {
 		}
 	}()
 
-	cmd.Start()
+	return cmd.Start()
 }
 
 func monitor(c Config) {
